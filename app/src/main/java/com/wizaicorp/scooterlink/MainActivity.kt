@@ -63,6 +63,8 @@ private const val NINEBOT_SVC = "6e400001-0000-0000-006e-696e65626f74"
 private const val NINEBOT_TX = "6e400002-0000-0000-006e-696e65626f74"
 private const val NINEBOT_RX = "6e400004-0000-0000-006e-696e65626f74"
 private const val CCCD = "00002902-0000-1000-8000-00805f9b34fb"
+private const val GAP_SVC = "00001800-0000-1000-8000-00805f9b34fb"
+private const val DEVICE_NAME_CHAR = "00002a00-0000-1000-8000-00805f9b34fb"
 private const val WRITE_CHUNK = 20 // MTU pazarlığı yapmadan güvenli üst sınır
 
 data class Found(val name: String, val address: String, val rssi: Int)
@@ -88,6 +90,8 @@ class BleController(private val ctx: Context) {
     private var notifyBuf = ArrayList<Byte>()
     private var frameDeferred: CompletableDeferred<ByteArray>? = null
     private var writeDeferred: CompletableDeferred<Boolean>? = null
+    private var readDeferred: CompletableDeferred<ByteArray?>? = null
+    private var gapDeviceName: String? = null
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -142,6 +146,8 @@ class BleController(private val ctx: Context) {
         notifyBuf = ArrayList()
         frameDeferred?.cancel(); frameDeferred = null
         writeDeferred?.cancel(); writeDeferred = null
+        readDeferred?.cancel(); readDeferred = null
+        gapDeviceName = null
         handshaking = false
         say("Bağlanılıyor: $address (ad: $connectedName)")
         gatt = dev.connectGatt(ctx, false, gattCb, BluetoothDevice.TRANSPORT_LE)
@@ -223,13 +229,36 @@ class BleController(private val ctx: Context) {
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
-            say(if (status == 0) "Bildirimler açıldı. Hazır: Eşleş'e basabilirsin." else "Bildirim açma hatası: $status")
+            say(if (status == 0) "Bildirimler açıldı." else "Bildirim açma hatası: $status")
             connected = (status == 0)
+            if (status == 0) {
+                scope.launch {
+                    val nameBytes = readDeviceNameChar()
+                    if (nameBytes != null) {
+                        gapDeviceName = String(nameBytes, Charsets.UTF_8)
+                        say("GATT cihaz adı (2a00): \"$gapDeviceName\" — el sıkışmasında bu kullanılacak.")
+                    } else {
+                        say("GATT cihaz adı okunamadı, taramadaki ad kullanılacak: \"$connectedName\"")
+                    }
+                    say("Hazır: Eşleş'e basabilirsin.")
+                }
+            }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
             writeDeferred?.complete(status == 0)
             writeDeferred = null
+        }
+
+        override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
+            readDeferred?.complete(if (status == 0) value else null)
+            readDeferred = null
+        }
+
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+            readDeferred?.complete(if (status == 0) c.value else null)
+            readDeferred = null
         }
 
         private fun handleIncoming(value: ByteArray) {
@@ -288,6 +317,16 @@ class BleController(private val ctx: Context) {
         return true
     }
 
+    private suspend fun readDeviceNameChar(): ByteArray? {
+        val g = gatt ?: return null
+        val svc = g.getService(UUID.fromString(GAP_SVC)) ?: return null
+        val char = svc.getCharacteristic(UUID.fromString(DEVICE_NAME_CHAR)) ?: return null
+        val d = CompletableDeferred<ByteArray?>()
+        readDeferred = d
+        if (!g.readCharacteristic(char)) { readDeferred = null; return null }
+        return withTimeoutOrNull(3000) { d.await() }
+    }
+
     private suspend fun waitFrame(timeoutMs: Long): ByteArray? {
         val d = CompletableDeferred<ByteArray>()
         frameDeferred = d
@@ -317,23 +356,44 @@ class BleController(private val ctx: Context) {
             say("Önce bağlan ve bildirimlerin açılmasını bekle."); return
         }
         notifyBuf = ArrayList() // önceki denemeden kalmış olabilecek baytları at
-        val btName = connectedName.toByteArray(Charsets.UTF_8)
-        say("El sıkışması başlıyor (cihaz adı: $connectedName)")
 
-        // --- PRE_COMM ---
-        var key = NbCrypto.deriveKey(btName, null)
-        val preHeader = byteArrayOf(0x5A, 0xA5.toByte(), 0x00)
-        val prePayload = byteArrayOf(0x3E, 0x04, 0x5B, 0x00)
-        if (!writeFrame(NbCrypto.encryptNonSn(key, preHeader, prePayload))) {
-            say("PRE_COMM: yazma başarısız."); return
+        // Hangi "cihaz adı" anahtar türetiminde doğru, bilmiyoruz: GATT'taki resmi
+        // ad varsa önce onu dene, olmazsa tarama sırasında görülen adı dene.
+        val nameCandidates = linkedSetOf<String>()
+        gapDeviceName?.let { nameCandidates.add(it) }
+        nameCandidates.add(connectedName)
+
+        var key: ByteArray? = null
+        var preResp: ByteArray? = null
+        var usedName = ""
+        for (name in nameCandidates) {
+            say("PRE_COMM deneniyor (cihaz adı: \"$name\")")
+            val btName = name.toByteArray(Charsets.UTF_8)
+            val k = NbCrypto.deriveKey(btName, null)
+            val preHeader = byteArrayOf(0x5A, 0xA5.toByte(), 0x00)
+            val prePayload = byteArrayOf(0x3E, 0x04, 0x5B, 0x00)
+            if (!writeFrame(NbCrypto.encryptNonSn(k, preHeader, prePayload))) {
+                say("PRE_COMM: yazma başarısız."); continue
+            }
+            val resp = waitFrame(8000)
+            if (resp == null) { say("PRE_COMM: cevap yok (zaman aşımı)."); continue }
+            val plain = NbCrypto.decryptNonSn(k, resp)
+            if (plain == null || plain.size < 34) {
+                say("PRE_COMM: bu adla deşifre/uzunluk tutmadı (ad=\"$name\"). Ham cevap: ${hex(resp)}")
+                continue
+            }
+            key = k; preResp = resp; usedName = name
+            break
         }
-        val preResp = waitFrame(4000) ?: run { say("PRE_COMM: cevap yok (zaman aşımı)."); return }
-        val prePlain = NbCrypto.decryptNonSn(key, preResp) ?: run { say("PRE_COMM: deşifre edilemedi."); return }
-        if (prePlain.size < 4 + 30) { say("PRE_COMM: beklenmeyen uzunluk (${prePlain.size})."); return }
+        if (key == null || preResp == null) {
+            say("PRE_COMM: hiçbir aday adla sonuç alınamadı."); return
+        }
+        val btName = usedName.toByteArray(Charsets.UTF_8)
+        val prePlain = NbCrypto.decryptNonSn(key, preResp)!!
         val storedFlag = prePlain[3].toInt()
         val authParam = prePlain.copyOfRange(4, 20)
         val serial = prePlain.copyOfRange(20, 34)
-        say("PRE_COMM tamam. Seri: ${String(serial, Charsets.US_ASCII)}  kayıtlı_şifre=${if (storedFlag != 0) "var" else "yok"}")
+        say("PRE_COMM tamam (ad: \"$usedName\"). Seri: ${String(serial, Charsets.US_ASCII)}  kayıtlı_şifre=${if (storedFlag != 0) "var" else "yok"}")
         say("auth_param: ${hex(authParam)}")
 
         var counter = 1 // start_sn
