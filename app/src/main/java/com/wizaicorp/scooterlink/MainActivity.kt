@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
@@ -16,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import java.util.UUID
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -50,6 +52,16 @@ import androidx.compose.ui.unit.sp
 
 private const val NINEBOT_SVC = "6e400001-0000-0000-006e-696e65626f74"
 private const val NORDIC_UART_SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+private const val NUS_TX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e" // telefon -> scooter
+private const val NUS_RX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e" // scooter -> telefon
+private const val CCCD = "00002902-0000-1000-8000-00805f9b34fb"
+
+// Sadece OKUMA: seri numarası (adres 0x10, 14 bayt). Toplam kontrolü: (0x7E xor 0xFFFF) = 0xFF81 -> 81 FF
+private val CMD_READ_SERIAL = byteArrayOf(
+    0x5A, 0xA5.toByte(), 0x01, 0x3E, 0x20, 0x01, 0x10, 0x0E, 0x81.toByte(), 0xFF.toByte()
+)
+
+fun hex(b: ByteArray?): String = b?.joinToString(" ") { "%02X".format(it) } ?: "(boş)"
 
 data class Found(val name: String, val address: String, val rssi: Int)
 
@@ -127,7 +139,65 @@ class BleController(private val ctx: Context) {
         if ((p and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) add("I")
     }.joinToString("/")
 
+    private var pendingCmd: ByteArray? = null
+
+    fun test() {
+        val g = gatt
+        if (g == null) { say("Önce bir cihaza bağlan."); return }
+        val svc = g.getService(UUID.fromString(NORDIC_UART_SVC))
+        val rx = svc?.getCharacteristic(UUID.fromString(NUS_RX))
+        if (rx == null) { say("Nordic UART servisi yok."); return }
+        pendingCmd = CMD_READ_SERIAL
+        say("Bildirimler açılıyor...")
+        g.setCharacteristicNotification(rx, true)
+        val cccd = rx.getDescriptor(UUID.fromString(CCCD))
+        if (cccd == null) { say("CCCD bulunamadı."); return }
+        if (Build.VERSION.SDK_INT >= 33) {
+            g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+        } else {
+            @Suppress("DEPRECATION")
+            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            @Suppress("DEPRECATION")
+            g.writeDescriptor(cccd)
+        }
+    }
+
+    private fun sendPending(g: BluetoothGatt) {
+        val cmd = pendingCmd ?: return
+        pendingCmd = null
+        val tx = g.getService(UUID.fromString(NORDIC_UART_SVC))?.getCharacteristic(UUID.fromString(NUS_TX))
+        if (tx == null) { say("TX karakteristiği yok."); return }
+        say("Gönderiliyor: ${hex(cmd)}")
+        if (Build.VERSION.SDK_INT >= 33) {
+            g.writeCharacteristic(tx, cmd, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        } else {
+            @Suppress("DEPRECATION")
+            tx.value = cmd
+            tx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            @Suppress("DEPRECATION")
+            g.writeCharacteristic(tx)
+        }
+    }
+
     private val gattCb = object : BluetoothGattCallback() {
+        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
+            say("Bildirim açma sonucu: status=$status")
+            if (status == 0) sendPending(g)
+        }
+
+        override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+            say("Yazma sonucu: status=$status")
+        }
+
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
+            say("CEVAP: ${hex(value)}")
+        }
+
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
+            say("CEVAP: ${hex(c.value)}")
+        }
+
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             say("Bağlantı durumu: status=$status state=$newState")
             if (newState == BluetoothProfile.STATE_CONNECTED) {
@@ -198,6 +268,10 @@ fun Screen() {
             OutlinedButton(onClick = {
                 clipboard.setText(AnnotatedString(ble.lines.joinToString("\n")))
             }) { Text("Logu kopyala") }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { ble.test() }) { Text("Test (seri no oku)") }
         }
 
         Text("Cihazlar (dokununca bağlanır):")
