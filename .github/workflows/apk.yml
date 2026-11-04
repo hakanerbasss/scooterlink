@@ -28,7 +28,18 @@ jobs:
           gradle-version: '8.10.2'
 
       - name: APK derle
-        run: gradle --no-daemon :app:assembleDebug
+        run: |
+          set +e
+          gradle --no-daemon :app:assembleDebug > build.log 2>&1
+          code=$?
+          set -e
+          if [ $code -ne 0 ]; then
+            grep -iE "error:|exception|FAILURE" build.log | tail -50 | while IFS= read -r line; do
+              safe=$(printf '%s' "$line" | cut -c1-500)
+              echo "::error::$safe"
+            done
+            exit $code
+          fi
 
       - name: Release olarak yayınla
         env:
