@@ -75,6 +75,7 @@ class BleController(private val ctx: Context) {
     val lines = mutableStateListOf<String>()
     var scanning by mutableStateOf(false)
     var connected by mutableStateOf(false)
+    var handshaking by mutableStateOf(false)
 
     private val raw = HashMap<String, BluetoothDevice>()
     private val main = Handler(Looper.getMainLooper())
@@ -138,6 +139,10 @@ class BleController(private val ctx: Context) {
         connectedName = dev.name ?: "Ninebot"
         gatt?.close()
         txChar = null; rxChar = null; connected = false
+        notifyBuf = ArrayList()
+        frameDeferred?.cancel(); frameDeferred = null
+        writeDeferred?.cancel(); writeDeferred = null
+        handshaking = false
         say("Bağlanılıyor: $address (ad: $connectedName)")
         gatt = dev.connectGatt(ctx, false, gattCb, BluetoothDevice.TRANSPORT_LE)
     }
@@ -294,13 +299,24 @@ class BleController(private val ctx: Context) {
     // ---------- El sıkışma (PRE_COMM / SET_PWD / AUTH) ----------
 
     fun startHandshake() {
-        scope.launch { handshake() }
+        if (handshaking) {
+            say("Zaten çalışıyor, bekle (düğmeye tekrar basmaya gerek yok)."); return
+        }
+        handshaking = true
+        scope.launch {
+            try {
+                handshake()
+            } finally {
+                handshaking = false
+            }
+        }
     }
 
     private suspend fun handshake() {
         if (gatt == null || txChar == null || rxChar == null) {
             say("Önce bağlan ve bildirimlerin açılmasını bekle."); return
         }
+        notifyBuf = ArrayList() // önceki denemeden kalmış olabilecek baytları at
         val btName = connectedName.toByteArray(Charsets.UTF_8)
         say("El sıkışması başlıyor (cihaz adı: $connectedName)")
 
@@ -411,7 +427,9 @@ fun Screen() {
             }) { Text("Logu kopyala") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { ble.startHandshake() }) { Text("Eşleş (El sıkışması)") }
+            Button(onClick = { ble.startHandshake() }, enabled = !ble.handshaking) {
+                Text(if (ble.handshaking) "Çalışıyor..." else "Eşleş (El sıkışması)")
+            }
         }
 
         Text("Cihazlar (dokununca bağlanır):")
