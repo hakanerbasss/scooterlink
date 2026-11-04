@@ -1,0 +1,41 @@
+# Elle çalışır: Actions -> APK derle -> Run workflow.
+# Secret gerekmez; debug imzalı APK üretir ve Release olarak yayınlar.
+name: APK derle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: APK derle
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Release olarak yayınla
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "apk-${{ github.run_number }}" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --title "ScooterLink ${{ github.run_number }}" \
+            --notes "Telefona indirip kur." \
+            --repo "${{ github.repository }}"
