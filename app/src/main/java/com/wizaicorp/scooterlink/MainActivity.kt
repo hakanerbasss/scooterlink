@@ -466,6 +466,24 @@ class BleController(private val ctx: Context) {
 
     // ---------- Güç kontrolü (resmi uygulamanın kilit/aç komutları) ----------
 
+    /** Ayar yaz → geri oku → doğrula. Değişmezse tekrar göndermez. Ayarlar duruyorken değiştirilir. */
+    fun setCtrl(label: String, idx: Int, value: Int) {
+        if (busy || !authed) return
+        scope.launch {
+            runBusy {
+                val sp = le(read(Dev.CTRL, 0x26), signed = true)
+                if (sp == null || sp != 0L) { say("$label: sadece dururken değiştirilir (hız=${sp ?: "okunamadı"})."); return@runBusy }
+                val before = le(read(Dev.CTRL, idx))
+                if (before == value.toLong()) { say("$label zaten $value."); return@runBusy }
+                say("$label: $before → $value yazılıyor...")
+                sendNoReply(Pkt(Dev.PHONE, Dev.CTRL, Cmd.WRITE_NO_REPLY, idx, byteArrayOf(value.toByte(), 0)))
+                delay(1200)
+                val after = le(read(Dev.CTRL, idx))
+                say(if (after == value.toLong()) "$label değişti ✓ ($after)" else "$label değişmedi (okunan: $after). Bu kayıt yazmayı kabul etmiyor olabilir.")
+            }
+        }
+    }
+
     fun setPower(on: Boolean) {
         if (busy || !authed) return
         scope.launch {
@@ -541,6 +559,16 @@ fun Screen() {
                                 Text(k, fontSize = 15.sp)
                                 Text(v, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                             }
+                        }
+                        Text("Sürüş modu:", fontSize = 13.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("Eco" to 1, "Normal" to 0, "Spor" to 2).forEach { (n, v) ->
+                                OutlinedButton(onClick = { ble.setCtrl("Mod", 0x75, v) }, enabled = !ble.busy) { Text(n) }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = { ble.setCtrl("Yürüme modu", 0x77, 1) }, enabled = !ble.busy) { Text("Yürüme aç") }
+                            OutlinedButton(onClick = { ble.setCtrl("Yürüme modu", 0x77, 0) }, enabled = !ble.busy) { Text("Yürüme kapa") }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { ble.setPower(true) }, enabled = !ble.busy && ble.powerOn != true) { Text("Gücü aç") }
