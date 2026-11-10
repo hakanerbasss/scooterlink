@@ -35,3 +35,17 @@ F2 Pro'nun bazı stok firmware sürümleri seri numarası/bölge değişikliğin
 Gerçek cihazdan alınan DRV/BLE sürümlerini ve seri önekini (tam numarayı değil) değerlendir. Firmware'in **doğrulanmış** bölge yazma yöntemi varsa bunu ayrı bir dalda, açık onay ekranı, işlem öncesi durum kaydı ve geri dönüş planıyla uygula. Bluetooth üzerinden destek yoksa ST-Link/uyumlu açık firmware veya uygun kontrolcü alternatifini incele.
 
 > 4 tekerlekli özel araçta ağırlık, aktarma oranı, fren sistemi ve termal korumalar scooter ile farklıdır. Yük altında denemeden önce tekerlerin yerden kesildiği, mekanik acil kesme anahtarlı bir test düzeneği kullan.
+
+
+## Aday hız kayıtları taraması (2026-11-10)
+
+Kullanıcının cihaz logu: şifreli Bluetooth oturumu başarılı, DRV kaydı 0x1A = `89 01` (sürüm `1.8.9` olarak yorumlanıyor), kontrolcü hata kaydı 0. BMS firmware sürümü alanının formatı teyit edilmedi.
+
+Yeni **Hız kayıtlarını tara (salt okunur)** düğmesi, ESC 0x20 üzerindeki `0x48`, `0x67`, `0x68`, `0x93` kayıtlarına yalnızca READ (0x01) gönderir; yanıtları ham hex ve little-endian tamsayı olarak günlüğe yazar.
+
+**Uyarı:** Bu kayıt adresleri farklı üçüncü taraf Ninebot dökümanlarından gelen *adaylardır*. Aynı adres farklı kontrolcü / firmware üzerinde farklı anlam taşıyabilir. Herhangi bir değer yazılmamalıdır. Kayıtlar yanıt verse bile hız sınırını değiştirme yetkisini kanıtlamaz. Yeni sürümde WRITE (0x02) ve bölge/seri numarası yazımı uygulanmamıştır.
+
+Yazma testi ancak kontrolcünün **tam firmware sürümü ve hedef kayıt adresi** güvenilir biçimde doğrulandıktan, orijinal değeri saklama/geri alma akışı oluşturulduktan sonra gündeme gelmeli.
+
+- ScooterHacking Utility F2 desteğini ve spor hız ayarlarını duyurur: https://t.me/s/scooterhackingupdates/83
+- XiaoDash F2 ailesinde özel firmware için ST-Link gerekliliğini belirtir: https://www.xiaodash.app/stlink
