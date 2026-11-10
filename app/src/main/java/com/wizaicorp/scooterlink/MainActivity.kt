@@ -398,11 +398,17 @@ class BleController(private val ctx: Context) {
         val pw = ByteArray(16).also { SecureRandom().nextBytes(it) }
         s.txKey = NbSession.K.BLE
         s.counter = 0
+        // Scooter "kabul edildi" cevabını YENİ şifreyle (APP anahtarı, AES) şifreliyor: çözebilmek için aday olarak ver.
+        s.password = pw
+        // Cevap kaybolsa bile şifre elde kalsın (onaylanmazsa giriş zaten reddedilir ve yeniden eşleştirme istenir).
+        savePassword(serial, pw)
         say("Scooter AÇIK olmalı. Ekran yanıp sönüp bip edince güç düğmesine bir kez KISA bas (basılı tutma). 60 sn bekliyorum...")
         pairDeadline = System.currentTimeMillis() + 60_000
         var told = false
         try {
             while (System.currentTimeMillis() < pairDeadline) {
+                s.txKey = NbSession.K.BLE
+                s.counter = 0 // SET_PWD her zaman zayıf modda gider
                 val r = request(Pkt(Dev.PHONE, Dev.BLE, Cmd.SET_PWD, 0, pw), 3000) { it.src == Dev.BLE && it.cmd == Cmd.SET_PWD }
                 if (r != null && r.idx == 1) {
                     savePassword(serial, pw)
