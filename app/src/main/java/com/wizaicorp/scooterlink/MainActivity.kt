@@ -517,7 +517,7 @@ class BleController(private val ctx: Context) {
                         "Kontrolcü (DRV)" to fw,
                         "Kontrolcü seri" to controllerSerial,
                         "Ekran/BLE sürüm" to bleVersion,
-                        "Batarya/BMS sürüm" to bmsVersion,
+                        "Batarya/BMS sürüm (tahmini)" to bmsVersion,
                         "Hata kodu" to error,
                         "Durum bayrakları (ham)" to flags,
                         "Bölge yazma desteği" to "Doğrulanmadı — komut gönderilmedi"
@@ -525,6 +525,45 @@ class BleController(private val ctx: Context) {
                     ui { diagnostics.putAll(results) }
                     results.forEach { (key, value) -> say("$key: $value") }
                     say("Tanılama tamamlandı. Hiçbir ayar değiştirilmedi.")
+                } finally {
+                    if (authed) startPolling()
+                }
+            }
+        }
+    }
+
+    /**
+     * Stok F2 Pro'ya ait belgelerde hız/bölge parametreleri farklı adreslerle
+     * anılabiliyor. Burada yalnızca okuma (Cmd.READ) yapılır.
+     * Sonuçlar herhangi bir hız/bölge kontrolünün mevcut olduğunu kanıtlamaz.
+     */
+    fun probeSpeedRegisters() {
+        if (busy || !authed) return
+        scope.launch {
+            runBusy {
+                pollJob?.cancelAndJoin()
+                pollJob = null
+                say("Aday hız kayıtları salt okunur taranıyor...")
+                try {
+                    val candidates = listOf(
+                        0x48 to "Nominal azami hız (aday)",
+                        0x67 to "Eco/Normal hız sınırı (aday)",
+                        0x68 to "Spor hız sınırı (aday)",
+                        0x93 to "Hız sınırı (aday)"
+                    )
+                    for ((idx, label) in candidates) {
+                        val bytes = read(Dev.CTRL, idx)
+                        val addr = "0x" + idx.toString(16).uppercase().padStart(2, '0')
+                        val result = if (bytes == null || bytes.isEmpty()) {
+                            "Yanıt yok / desteklenmiyor"
+                        } else {
+                            "Ham: ${hex(bytes)} | LE değer: ${le(bytes)} | Ölçek doğrulanmadı"
+                        }
+                        val key = "$addr — $label"
+                        ui { diagnostics[key] = result }
+                        say("$key: $result")
+                    }
+                    say("Aday hız kaydı taraması bitti. HİÇBİR YAZMA KOMUTU GÖNDERİLMEDİ.")
                 } finally {
                     if (authed) startPolling()
                 }
@@ -644,6 +683,10 @@ fun Screen() {
                                     onClick = { ble.readControllerDiagnostics() },
                                     enabled = !ble.busy
                                 ) { Text("Kontrolcüyü analiz et") }
+                                OutlinedButton(
+                                    onClick = { ble.probeSpeedRegisters() },
+                                    enabled = !ble.busy
+                                ) { Text("Hız kayıtlarını tara (salt okunur)") }
                                 for ((label, value) in ble.diagnostics) {
                                     Column {
                                         Text(label, fontSize = 12.sp)
