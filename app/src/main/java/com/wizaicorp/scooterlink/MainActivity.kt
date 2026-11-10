@@ -512,12 +512,14 @@ class BleController(private val ctx: Context) {
                     val error = le(read(Dev.CTRL, 0x1B))?.toString() ?: "Yanıt yok"
                     val flags = read(Dev.CTRL, 0x1D)?.let { hex(it) } ?: "Yanıt yok"
                     val bleVersion = firmwareVersion(read(Dev.BLE, 0x1A))
-                    val bmsVersion = firmwareVersion(read(Dev.BMS, 0x1A))
+                    val bmsRawLegacy = read(Dev.BMS, 0x1A)?.let { hex(it) } ?: "Yanıt yok"
+                    val bmsRawFirmware = read(Dev.BMS, 0x17)?.let { hex(it) } ?: "Yanıt yok"
                     val results = linkedMapOf(
                         "Kontrolcü (DRV)" to fw,
                         "Kontrolcü seri" to controllerSerial,
                         "Ekran/BLE sürüm" to bleVersion,
-                        "Batarya/BMS sürüm (tahmini)" to bmsVersion,
+                        "BMS 0x1A (ham)" to bmsRawLegacy,
+                        "BMS 0x17 (ham / sürüm adayı)" to bmsRawFirmware,
                         "Hata kodu" to error,
                         "Durum bayrakları (ham)" to flags,
                         "Bölge yazma desteği" to "Doğrulanmadı — komut gönderilmedi"
@@ -546,10 +548,13 @@ class BleController(private val ctx: Context) {
                 say("Aday hız kayıtları salt okunur taranıyor...")
                 try {
                     val candidates = listOf(
-                        0x48 to "Nominal azami hız (aday)",
-                        0x67 to "Eco/Normal hız sınırı (aday)",
-                        0x68 to "Spor hız sınırı (aday)",
-                        0x93 to "Hız sınırı (aday)"
+                        0x48 to "Bilinmeyen / nominal hız adayı",
+                        0x67 to "Bilinmeyen parametre",
+                        0x68 to "Bilinmeyen / sürüm adayı",
+                        0x73 to "Bilinmeyen / mod sınırı adayı",
+                        0x74 to "Bilinmeyen / mod sınırı adayı",
+                        0x93 to "Bilinmeyen / hız sınırı adayı",
+                        0xF1 to "Bilinmeyen / uygulama azami hızı adayı"
                     )
                     for ((idx, label) in candidates) {
                         val bytes = read(Dev.CTRL, idx)
