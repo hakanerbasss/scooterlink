@@ -473,7 +473,7 @@ class BleController(private val ctx: Context) {
     // Kesinlikle WRITE_NO_REPLY veya firmware güncelleme komutu gönderilmez.
     private fun firmwareVersion(bytes: ByteArray?): String {
         val raw = le(bytes)?.toInt() ?: return "Yanıt yok"
-        if (bytes.size != 2 || raw == 0 || raw == 0xFFFF) return "Bilinmeyen (${hex(bytes)})"
+        if (bytes?.size != 2 || raw == 0 || raw == 0xFFFF) return "Bilinmeyen (${hex(bytes)})"
         return "${raw ushr 8}.${(raw ushr 4) and 0x0F}.${raw and 0x0F} (ham: ${hex(bytes)})"
     }
 
