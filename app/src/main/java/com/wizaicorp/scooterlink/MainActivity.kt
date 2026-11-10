@@ -125,6 +125,7 @@ class BleController(private val ctx: Context) {
     private var replies = Channel<Pkt>(Channel.UNLIMITED)
     private val gate = Mutex()
     private var pollJob: Job? = null
+    @Volatile private var pairDeadline = 0L
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val prefs = ctx.getSharedPreferences("creds", Context.MODE_PRIVATE)
@@ -274,6 +275,10 @@ class BleController(private val ctx: Context) {
             val on = p.data[2].toInt() != 0
             ui { powerOn = on; tele["Güç"] = if (on) "Açık" else "Kapalı" }
             say("Bildirim: güç ${if (on) "AÇILDI" else "KAPANDI"}")
+            if (on && pairDeadline > 0) {
+                pairDeadline = System.currentTimeMillis() + 60_000
+                say("Scooter açıldı (bu basış onay sayılmadı). Ekran yanıp sönüp bip ederken güç düğmesine TEKRAR bir kez kısa bas.")
+            }
         } else say("Bildirim: $p")
     }
 
@@ -393,20 +398,25 @@ class BleController(private val ctx: Context) {
         val pw = ByteArray(16).also { SecureRandom().nextBytes(it) }
         s.txKey = NbSession.K.BLE
         s.counter = 0
-        say("ŞİMDİ scooter'ın güç düğmesine bir kez kısa bas (60 sn bekliyorum)...")
-        repeat(30) {
-            val r = request(Pkt(Dev.PHONE, Dev.BLE, Cmd.SET_PWD, 0, pw), 2000) { it.src == Dev.BLE && it.cmd == Cmd.SET_PWD }
-            if (r != null && r.idx == 1) {
-                savePassword(serial, pw)
-                say("Eşleşme kabul edildi ✓ Şifre bu telefona kaydedildi. Yeniden bağlanılıyor...")
-                val addr = lastAddress
-                main.post { disconnect() }
+        say("Scooter AÇIK olmalı. Ekran yanıp sönüp bip edince güç düğmesine bir kez KISA bas (basılı tutma). 60 sn bekliyorum...")
+        pairDeadline = System.currentTimeMillis() + 60_000
+        var told = false
+        try {
+            while (System.currentTimeMillis() < pairDeadline) {
+                val r = request(Pkt(Dev.PHONE, Dev.BLE, Cmd.SET_PWD, 0, pw), 3000) { it.src == Dev.BLE && it.cmd == Cmd.SET_PWD }
+                if (r != null && r.idx == 1) {
+                    savePassword(serial, pw)
+                    say("Eşleşme kabul edildi ✓ Şifre bu telefona kaydedildi. Yeniden bağlanılıyor...")
+                    val addr = lastAddress
+                    main.post { disconnect() }
+                    delay(2000)
+                    if (addr != null) main.post { connect(addr) }
+                    return
+                }
+                if (r != null && !told) { told = true; say("Scooter onay bekliyor — güç düğmesine kısa bas.") }
                 delay(2000)
-                if (addr != null) main.post { connect(addr) }
-                return
             }
-            if (r != null) say("Bekleniyor — düğmeye bas...")
-        }
+        } finally { pairDeadline = 0L }
         say("Eşleşme zaman aşımı (düğmeye basılmadı mı?).")
     }
 
