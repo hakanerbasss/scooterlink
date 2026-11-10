@@ -139,6 +139,21 @@ class BleController(private val ctx: Context) {
         say(if (NbCrypto.selfTest()) "Kripto öz-testi: OK" else "Kripto öz-testi: HATA!")
     }
 
+    /** Panel + tanılama + log: kopyalanacak tam rapor. */
+    fun report(): String = buildString {
+        if (serialText.isNotEmpty()) appendLine("Cihaz: $serialText (${modelOf(serialText)})")
+        if (tele.isNotEmpty()) {
+            appendLine("--- Panel ---")
+            for (k in TELE_KEYS) tele[k]?.let { appendLine("$k: $it") }
+        }
+        if (diagnostics.isNotEmpty()) {
+            appendLine("--- Tanılama ---")
+            for ((k, v) in diagnostics) appendLine("$k: $v")
+        }
+        appendLine("--- Log ---")
+        append(lines.joinToString("\n"))
+    }
+
     fun say(s: String) { main.post { lines.add(s) } }
     private fun ui(f: () -> Unit) { main.post(f) }
 
@@ -589,7 +604,7 @@ fun Screen() {
                 Text(if (ble.scanning) "Durdur" else "Tara")
             }
             OutlinedButton(onClick = { ble.disconnect(); ble.say("Bağlantı kesildi.") }) { Text("Kes") }
-            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(ble.lines.joinToString("\n"))) }) { Text("Logu kopyala") }
+            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(ble.report())) }) { Text("Logu kopyala") }
         }
 
         if (ble.connected) {
