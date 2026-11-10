@@ -113,6 +113,11 @@ class BleController(private val ctx: Context) {
     var serialText by mutableStateOf("")
     var powerOn by mutableStateOf<Boolean?>(null)
     var experimentalResult by mutableStateOf("Henüz denenmedi")
+    // Oturumsuz (INIT/şifre öncesi) ham komut: topluluk yöntemi nRF Connect ile, resmi uygulama
+    // bağlı değilken, şifreli oturum AÇILMADAN yazıyor. Bekleyen komut bağlantı kurulunca gönderilir.
+    @Volatile private var pendingRaw: ByteArray? = null
+    @Volatile private var pendingRawLabel = ""
+    val canRaw: Boolean get() = lastAddress != null
 
     private val raw = HashMap<String, BluetoothDevice>()
     private val main = Handler(Looper.getMainLooper())
@@ -251,7 +256,14 @@ class BleController(private val ctx: Context) {
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
             if (status != 0) { say("Bildirim açma hatası: $status"); return }
             ui { connected = true }
-            scope.launch { runBusy { startSession() } }
+            val raw = pendingRaw
+            if (raw != null) {
+                pendingRaw = null
+                val label = pendingRawLabel
+                scope.launch { runBusy { runSessionlessRaw(raw, label) } }
+            } else {
+                scope.launch { runBusy { startSession() } }
+            }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
@@ -605,6 +617,49 @@ class BleController(private val ctx: Context) {
         ok
     }
 
+    private fun speedCmd(enable: Boolean) = byteArrayOf(
+        0x55, 0xAB.toByte(), 0x46, 0x32, 0x53, 0x63, 0x6F,
+        0x6F, 0x74, 0x65, 0x72, 0x5F,
+        if (enable) 0x31 else 0x30
+    )
+
+    /**
+     * Topluluk yöntemini birebir taklit eder: temiz bağlantı, INIT/şifre YOK, tek no-response yazım.
+     * Ardından bağlantı kesilip normal oturum açılır ve 0xF1 okunur. Hız artışı yalnızca
+     * scooter göstergesinden/tekerlek havadayken doğrulanır.
+     */
+    fun sendSessionlessSpeedCommand(enable: Boolean) {
+        val addr = lastAddress ?: run { say("Önce bir cihaza bağlan (adres yok)."); return }
+        if (busy) return
+        pendingRaw = speedCmd(enable)
+        pendingRawLabel = if (enable) "Oturumsuz hız açma" else "Oturumsuz geri alma"
+        say("$pendingRawLabel: temiz bağlantı kuruluyor (INIT gönderilmeyecek)...")
+        gatt?.disconnect()
+        resetLink()
+        scope.launch {
+            delay(1500)
+            connect(addr)
+        }
+    }
+
+    private suspend fun runSessionlessRaw(data: ByteArray, label: String) {
+        try {
+            delay(800) // CCCD sonrası cihazın sakinleşmesi için
+            val queued = writeRawSpeedPacket(data)
+            say("$label: ham paket ${hex(data)} gönderildi, kuyruk=${queued}.")
+            delay(1500)
+            ui { experimentalResult = "$label: gönderildi (kuyruk=$queued). Doğrulama için tekerlek havadayken göstergeden maksimum hızı oku." }
+        } finally {
+            val addr = lastAddress
+            gatt?.disconnect()
+            resetLink()
+            if (addr != null) {
+                say("Normal oturum 2 sn sonra açılacak; 0xF1 tekrar okunacak.")
+                scope.launch { delay(2000); connect(addr) }
+            }
+        }
+    }
+
     fun sendExperimentalSpeedCommand(enable: Boolean) {
         if (busy || !connected || !authed) return
         scope.launch {
@@ -624,11 +679,7 @@ class BleController(private val ctx: Context) {
                         return@runBusy
                     }
                     val before = le(read(Dev.CTRL, 0xF1))
-                    val cmd = byteArrayOf(
-                        0x55, 0xAB.toByte(), 0x46, 0x32, 0x53, 0x63, 0x6F,
-                        0x6F, 0x74, 0x65, 0x72, 0x5F,
-                        if (enable) 0x31 else 0x30
-                    )
+                    val cmd = speedCmd(enable)
                     val label = if (enable) "Deneysel hız açma" else "Normal moda geri alma"
                     say("$label: tek BLE ham komutu gönderiliyor; DRV 1.8.9 desteği belirsiz.")
                     val queued = writeRawSpeedPacket(cmd)
@@ -701,6 +752,7 @@ fun Screen() {
     val clipboard = LocalClipboardManager.current
     val ble = remember { BleController(context.applicationContext) }
     var experimentalChoice by remember { mutableStateOf<Boolean?>(null) }
+    var sessionless by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose { ble.stopScan(); ble.disconnect() }
@@ -722,7 +774,8 @@ fun Screen() {
             },
             confirmButton = {
                 Button(onClick = {
-                    ble.sendExperimentalSpeedCommand(enable)
+                    if (sessionless) ble.sendSessionlessSpeedCommand(enable)
+                    else ble.sendExperimentalSpeedCommand(enable)
                     experimentalChoice = null
                 }) { Text("Komutu bir kez gönder") }
             },
@@ -818,9 +871,17 @@ fun Screen() {
                                     fontSize = 12.sp
                                 )
                                 Button(
-                                    onClick = { experimentalChoice = true },
+                                    onClick = { sessionless = false; experimentalChoice = true },
                                     enabled = !ble.busy && ble.powerOn == true
                                 ) { Text("Deneysel hız açma komutu") }
+                                Button(
+                                    onClick = { sessionless = true; experimentalChoice = true },
+                                    enabled = !ble.busy && ble.canRaw
+                                ) { Text("Oturumsuz gönder (nRF Connect gibi)") }
+                                OutlinedButton(
+                                    onClick = { sessionless = true; experimentalChoice = false },
+                                    enabled = !ble.busy && ble.canRaw
+                                ) { Text("Oturumsuz geri alma") }
                                 OutlinedButton(
                                     onClick = { experimentalChoice = false },
                                     enabled = !ble.busy && ble.powerOn == true
