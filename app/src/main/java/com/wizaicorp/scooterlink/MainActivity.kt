@@ -22,14 +22,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -435,7 +435,7 @@ class BleController(private val ctx: Context) {
         pollJob = scope.launch {
             var tick = 0
             while (isActive && authed) {
-                try { pollOnce(tick % 5 == 0) } catch (e: Exception) { say("Okuma hatası: ${e.message}") }
+                try { pollOnce(tick % 5 == 0) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; say("Okuma hatası: ${e.message}") }
                 tick++
                 delay(800)
             }
@@ -581,7 +581,7 @@ fun Screen() {
         if (res.values.all { it }) ble.startScan() else ble.say("İzin verilmedi.")
     }
 
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("ScooterLink", fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -673,21 +673,17 @@ fun Screen() {
 
         if (!ble.connected) {
             Text("Cihazlar (dokununca bağlanır):")
-            LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-                items(ble.devices.values.sortedByDescending { it.rssi }) { d ->
-                    val hint = d.name.uppercase().let { it.startsWith("NAG") || "NINEBOT" in it || "SEGWAY" in it }
-                    Text(
-                        "${if (hint) "★ " else ""}${d.name}  ${d.address}  ${d.rssi} dBm",
-                        modifier = Modifier.fillMaxWidth().clickable { ble.connect(d.address) }.padding(vertical = 6.dp),
-                        fontSize = 14.sp
-                    )
-                }
+            for (d in ble.devices.values.sortedByDescending { it.rssi }) {
+                val hint = d.name.uppercase().let { it.startsWith("NAG") || "NINEBOT" in it || "SEGWAY" in it }
+                Text(
+                    "${if (hint) "★ " else ""}${d.name}  ${d.address}  ${d.rssi} dBm",
+                    modifier = Modifier.fillMaxWidth().clickable { ble.connect(d.address) }.padding(vertical = 6.dp),
+                    fontSize = 14.sp
+                )
             }
         }
 
-        Text("Log:", fontSize = 12.sp)
-        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-            items(ble.lines.toList().asReversed()) { Text(it, fontSize = 11.sp) }
-        }
+        Text("Log (en yeni üstte, son 150 satır):", fontSize = 12.sp)
+        for (line in ble.lines.toList().asReversed().take(150)) Text(line, fontSize = 11.sp)
     }
 }
