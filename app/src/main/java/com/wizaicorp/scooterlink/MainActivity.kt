@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -111,6 +112,7 @@ class BleController(private val ctx: Context) {
     var needPair by mutableStateOf(false)
     var serialText by mutableStateOf("")
     var powerOn by mutableStateOf<Boolean?>(null)
+    var experimentalResult by mutableStateOf("Henüz denenmedi")
 
     private val raw = HashMap<String, BluetoothDevice>()
     private val main = Handler(Looper.getMainLooper())
@@ -576,6 +578,78 @@ class BleController(private val ctx: Context) {
         }
     }
 
+
+    // F2 ailesi için topluluk tarafından raporlanan 55 AB "F2Scooter_1/0"
+    // doğrudan NUS_TX bildirimi. Bu, F2 Pro DRV 1.8.9 üzerinde DOĞRULANMAMIŞTIR.
+    // Seri numarası, bölge kaydı ve kontrolcü firmware'i değiştirilmiyor.
+    // Yalnızca kullanıcının açık onayı ve scooter HAREKETSİZKEN 1 kez gönderilir.
+    private suspend fun writeRawSpeedPacket(data: ByteArray): Boolean = gate.withLock {
+        val g = gatt ?: return@withLock false
+        val tx = txChar ?: return@withLock false
+        if ((tx.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) == 0) {
+            say("Doğrudan BLE komutu iptal: yazma-yanıtsız NUS_TX desteklenmiyor.")
+            return@withLock false
+        }
+        val ok = if (Build.VERSION.SDK_INT >= 33) {
+            g.writeCharacteristic(tx, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) ==
+                android.bluetooth.BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            tx.value = data
+            tx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            @Suppress("DEPRECATION")
+            g.writeCharacteristic(tx)
+        }
+        // BLE yazma-yanıtsızda ACK yok; Android'in kuyruk kabulü başarı kanıtı değildir.
+        delay(500)
+        ok
+    }
+
+    fun sendExperimentalSpeedCommand(enable: Boolean) {
+        if (busy || !connected || !authed) return
+        scope.launch {
+            runBusy {
+                pollJob?.cancelAndJoin()
+                pollJob = null
+                try {
+                    val speedRaw = le(read(Dev.CTRL, 0x26), signed = true)
+                    if (speedRaw != 0L || powerOn != true) {
+                        val why = "İşlem iptal: motor hızı sıfır okunmalı ve scooter açık olmalı. Hız ham=$speedRaw."
+                        ui { experimentalResult = why }
+                        say(why)
+                        return@runBusy
+                    }
+                    if (!serialText.uppercase().startsWith("NAG")) {
+                        say("İşlem iptal: cihaz Ninebot F2 ailesi olarak tanınmadı.")
+                        return@runBusy
+                    }
+                    val before = le(read(Dev.CTRL, 0xF1))
+                    val cmd = byteArrayOf(
+                        0x55, 0xAB.toByte(), 0x46, 0x32, 0x53, 0x63, 0x6F,
+                        0x6F, 0x74, 0x65, 0x72, 0x5F,
+                        if (enable) 0x31 else 0x30
+                    )
+                    val label = if (enable) "Deneysel hız açma" else "Normal moda geri alma"
+                    say("$label: tek BLE ham komutu gönderiliyor; DRV 1.8.9 desteği belirsiz.")
+                    val queued = writeRawSpeedPacket(cmd)
+                    if (!queued) {
+                        ui { experimentalResult = "Bluetooth komutu kuyruğa alınamadı / desteklenmiyor." }
+                        say(experimentalResult)
+                        return@runBusy
+                    }
+                    delay(900)
+                    val after = le(read(Dev.CTRL, 0xF1))
+                    val result = "$label: BLE kuyruğa alındı. F1 önce=$before, sonra=$after. " +
+                        "Kontrolcünün komutu kabul ettiği veya hızın değiştiği doğrulanmadı."
+                    ui { experimentalResult = result }
+                    say(result)
+                } finally {
+                    if (authed) startPolling()
+                }
+            }
+        }
+    }
+
     // ---------- Güç kontrolü (resmi uygulamanın kilit/aç komutları) ----------
 
     /** Ayar yaz → geri oku → doğrula. Değişmezse tekrar göndermez. Ayarlar duruyorken değiştirilir. */
@@ -626,9 +700,36 @@ fun Screen() {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val ble = remember { BleController(context.applicationContext) }
+    var experimentalChoice by remember { mutableStateOf<Boolean?>(null) }
 
     DisposableEffect(Unit) {
         onDispose { ble.stopScan(); ble.disconnect() }
+    }
+
+    if (experimentalChoice != null) {
+        val enable = experimentalChoice == true
+        AlertDialog(
+            onDismissRequest = { experimentalChoice = null },
+            title = { Text(if (enable) "Deneysel hız komutu" else "Normal moda geri alma") },
+            text = {
+                Text(
+                    "Bu komut F2 Pro DRV 1.8.9 üzerinde doğrulanmadı. " +
+                    "Bluetooth yazımı kabul edilse bile hızın değiştiği anlamına gelmez. " +
+                    "Scooter tamamen sabit, frenleri hazır ve tekerler yerde yük altında değilken " +
+                    "deneyin. Seri numarası ve firmware değiştirilmeyecek. " +
+                    "Hatalı/uyumsuz komut cihaz işlevini etkileyebilir. Devam edilsin mi?"
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    ble.sendExperimentalSpeedCommand(enable)
+                    experimentalChoice = null
+                }) { Text("Komutu bir kez gönder") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { experimentalChoice = null }) { Text("Vazgeç") }
+            }
+        )
     }
 
     val perms = if (Build.VERSION.SDK_INT >= 31) {
@@ -703,6 +804,28 @@ fun Screen() {
                                         "Seri numarası kişisel cihaz bilgisidir; yayımlamadan önce gizle.",
                                     fontSize = 11.sp
                                 )
+                            }
+                        }
+                        Card(Modifier.fillMaxWidth()) {
+                            Column(
+                                Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("Deneysel F2 Pro BLE hız modu", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Topluluk yöntemi; DRV 1.8.9 uyumluluğu bilinmiyor. " +
+                                    "Mod değiştirme komutundan farklıdır. Tek seferlik ham BLE yazımıdır.",
+                                    fontSize = 12.sp
+                                )
+                                Button(
+                                    onClick = { experimentalChoice = true },
+                                    enabled = !ble.busy && ble.powerOn == true
+                                ) { Text("Deneysel hız açma komutu") }
+                                OutlinedButton(
+                                    onClick = { experimentalChoice = false },
+                                    enabled = !ble.busy && ble.powerOn == true
+                                ) { Text("Normal moda geri alma komutu") }
+                                Text(ble.experimentalResult, fontSize = 11.sp)
                             }
                         }
                         Text("Sürüş modu:", fontSize = 13.sp)
