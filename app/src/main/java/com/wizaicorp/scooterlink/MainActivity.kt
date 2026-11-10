@@ -58,6 +58,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -102,6 +103,7 @@ class BleController(private val ctx: Context) {
     val devices = mutableStateMapOf<String, Found>()
     val lines = mutableStateListOf<String>()
     val tele = mutableStateMapOf<String, String>()
+    val diagnostics = mutableStateMapOf<String, String>()
     var scanning by mutableStateOf(false)
     var connected by mutableStateOf(false)
     var authed by mutableStateOf(false)
@@ -190,7 +192,7 @@ class BleController(private val ctx: Context) {
         writeDeferred?.cancel(); writeDeferred = null
         replies.close(); replies = Channel(Channel.UNLIMITED)
         session = null
-        ui { connected = false; authed = false; needPair = false; powerOn = null; tele.clear() }
+        ui { connected = false; authed = false; needPair = false; powerOn = null; tele.clear(); diagnostics.clear() }
     }
 
     fun disconnect() {
@@ -464,6 +466,57 @@ class BleController(private val ctx: Context) {
         }
     }
 
+
+    // -------- F2 Pro kontrolcü tanılama: TAMAMEN SALT OKUNUR --------
+    // 0x1A/0x1B/0x1D/0x10 adresleri eski Ninebot protokolünde belgeli.
+    // F2 Pro bazı sürümlerde kayıtları yanıtlamayabilir; yanıt yoksa tahmin üretme.
+    // Kesinlikle WRITE_NO_REPLY veya firmware güncelleme komutu gönderilmez.
+    private fun firmwareVersion(bytes: ByteArray?): String {
+        val raw = le(bytes)?.toInt() ?: return "Yanıt yok"
+        if (bytes.size != 2 || raw == 0 || raw == 0xFFFF) return "Bilinmeyen (${hex(bytes)})"
+        return "${raw ushr 8}.${(raw ushr 4) and 0x0F}.${raw and 0x0F} (ham: ${hex(bytes)})"
+    }
+
+    fun readControllerDiagnostics() {
+        if (busy || !authed) return
+        scope.launch {
+            runBusy {
+                // Telemetri sorguları ile karışmadan tek seferlik tanılama yap.
+                pollJob?.cancelAndJoin()
+                pollJob = null
+                ui { diagnostics.clear() }
+                say("F2 Pro tanılama başladı (salt okunur).")
+                try {
+                    val fw = firmwareVersion(read(Dev.CTRL, 0x1A))
+                    val controllerSerialBytes = read(Dev.CTRL, 0x10, 14)
+                    val controllerSerial = controllerSerialBytes
+                        ?.takeIf { it.isNotEmpty() && it.all { c -> (c.toInt() and 0xFF) == 0 || (c.toInt() and 0xFF) in 32..126 } }
+                        ?.let { String(it, Charsets.US_ASCII).trimEnd('\u0000', ' ') }
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: "Yanıt yok / desteklenmiyor"
+                    val error = le(read(Dev.CTRL, 0x1B))?.toString() ?: "Yanıt yok"
+                    val flags = read(Dev.CTRL, 0x1D)?.let { hex(it) } ?: "Yanıt yok"
+                    val bleVersion = firmwareVersion(read(Dev.BLE, 0x1A))
+                    val bmsVersion = firmwareVersion(read(Dev.BMS, 0x1A))
+                    val results = linkedMapOf(
+                        "Kontrolcü (DRV)" to fw,
+                        "Kontrolcü seri" to controllerSerial,
+                        "Ekran/BLE sürüm" to bleVersion,
+                        "Batarya/BMS sürüm" to bmsVersion,
+                        "Hata kodu" to error,
+                        "Durum bayrakları (ham)" to flags,
+                        "Bölge yazma desteği" to "Doğrulanmadı — komut gönderilmedi"
+                    )
+                    ui { diagnostics.putAll(results) }
+                    results.forEach { (key, value) -> say("$key: $value") }
+                    say("Tanılama tamamlandı. Hiçbir ayar değiştirilmedi.")
+                } finally {
+                    if (authed) startPolling()
+                }
+            }
+        }
+    }
+
     // ---------- Güç kontrolü (resmi uygulamanın kilit/aç komutları) ----------
 
     /** Ayar yaz → geri oku → doğrula. Değişmezse tekrar göndermez. Ayarlar duruyorken değiştirilir. */
@@ -558,6 +611,35 @@ fun Screen() {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(k, fontSize = 15.sp)
                                 Text(v, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+
+                        Card(Modifier.fillMaxWidth()) {
+                            Column(
+                                Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("F2 Pro kontrolcü tanılama", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Yalnızca sürüm ve durum kayıtlarını okur. " +
+                                        "Bölge veya hız sınırı değiştirme komutu göndermez.",
+                                    fontSize = 12.sp
+                                )
+                                Button(
+                                    onClick = { ble.readControllerDiagnostics() },
+                                    enabled = !ble.busy
+                                ) { Text("Kontrolcüyü analiz et") }
+                                for ((label, value) in ble.diagnostics) {
+                                    Column {
+                                        Text(label, fontSize = 12.sp)
+                                        Text(value, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    }
+                                }
+                                Text(
+                                    "Sonuçları paylaşmak için yukarıdaki 'Logu kopyala' düğmesini kullan. " +
+                                        "Seri numarası kişisel cihaz bilgisidir; yayımlamadan önce gizle.",
+                                    fontSize = 11.sp
+                                )
                             }
                         }
                         Text("Sürüş modu:", fontSize = 13.sp)
